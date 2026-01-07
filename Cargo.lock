@@ -2729,7 +2729,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "servo-gui"
+name = "servo-control"
 version = "0.1.0"
 dependencies = [
  "eframe",
@@ -2888,9 +2888,9 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "sts3215-controller"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a157201b011c30c046dd186266198083524f4cd1078281864bebc4804a6a3299"
+checksum = "e7b728b0893482df5a0c73cd6ed0a9e9bc93cc095426844073310a7c37ce4dc0"
 dependencies = [
  "cbindgen",
  "serialport",

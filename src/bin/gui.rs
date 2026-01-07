@@ -97,7 +97,7 @@ impl eframe::App for ServoGuiApp {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                ui.heading("🤖 Cogni-Robot Servo Control");
+                ui.heading("Cogni-Robot Servo Control");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label("by notpunchnox");
                     let state = self.state.lock().unwrap();
@@ -120,14 +120,14 @@ impl eframe::App for ServoGuiApp {
             // Section de détection des servos
             ui.group(|ui| {
                 ui.set_min_height(100.0);
-                ui.heading("📡 Servo Detection");
+                ui.heading("Servo Detection");
                 ui.add_space(5.0);
                 
                 if state.servo_ids.is_empty() {
                     ui.colored_label(egui::Color32::from_rgb(230, 126, 34), "⚠ No servo detected");
                 } else {
                     ui.horizontal(|ui| {
-                        ui.label(format!("🎯 Detected servos: {} ", state.servo_ids.len()));
+                        ui.label(format!("Detected servos: {} ", state.servo_ids.len()));
                         ui.label(format!("{:?}", state.servo_ids));
                     });
                     
@@ -149,7 +149,7 @@ impl eframe::App for ServoGuiApp {
             // Section de changement d'ID
             if state.servo_ids.len() == 1 {
                 ui.group(|ui| {
-                    ui.heading("🔧 Change Servo ID");
+                    ui.heading("Change Servo ID");
                     ui.add_space(5.0);
                     
                     ui.horizontal(|ui| {
@@ -159,7 +159,7 @@ impl eframe::App for ServoGuiApp {
                             .desired_width(60.0)
                             .hint_text("0-253"));
                         
-                        if ui.button("✓ Apply").clicked() {
+                        if ui.button("Apply").clicked() {
                             if let Ok(new_id) = state.new_id_input.parse::<u8>() {
                                 if new_id <= 253 {
                                     if let Ok(servo) = ST3215::new("ACM03") {
@@ -176,13 +176,13 @@ impl eframe::App for ServoGuiApp {
             // Section de contrôle du servo sélectionné
             if let Some(servo_id) = state.selected_servo {
                 ui.group(|ui| {
-                    ui.heading(format!("🎮 Control Servo ID {}", servo_id));
+                    ui.heading(format!("Control Servo ID {}", servo_id));
                     ui.add_space(5.0);
                     
                     // Affichage des données en temps réel
                     ui.columns(3, |columns| {
                         columns[0].vertical(|ui| {
-                            ui.label("📍 Position:");
+                            ui.label("Position:");
                             if let Some(pos) = state.servo_data.position {
                                 ui.heading(format!("{}", pos));
                             } else {
@@ -191,7 +191,7 @@ impl eframe::App for ServoGuiApp {
                         });
                         
                         columns[1].vertical(|ui| {
-                            ui.label("🌡️ Temperature:");
+                            ui.label("Temperature:");
                             if let Some(temp) = state.servo_data.temperature {
                                 let color = if temp > 60 {
                                     egui::Color32::RED
@@ -207,7 +207,7 @@ impl eframe::App for ServoGuiApp {
                         });
                         
                         columns[2].vertical(|ui| {
-                            ui.label("⚡ Voltage:");
+                            ui.label("Voltage:");
                             if let Some(v) = state.servo_data.voltage {
                                 ui.heading(format!("{:.2}V", v));
                             } else {
@@ -221,25 +221,25 @@ impl eframe::App for ServoGuiApp {
                     // Contrôles de mouvement
                     ui.separator();
                     ui.add_space(5.0);
-                    ui.label("🎯 Target Position (0-4095):");
+                    ui.label("Target Position (0-4095):");
                     ui.add(egui::Slider::new(&mut state.target_position, 0..=4095));
                     
-                    ui.label("⚡ Speed (0-3400):");
+                    ui.label("Speed (0-3400):");
                     ui.add(egui::Slider::new(&mut state.target_speed, 0..=3400));
                     
-                    ui.label("🚀 Acceleration (0-254):");
+                    ui.label("Acceleration (0-254):");
                     ui.add(egui::Slider::new(&mut state.acceleration, 0..=254));
                     
                     ui.add_space(5.0);
                     
                     ui.horizontal(|ui| {
-                        if ui.button("▶ Move").clicked() {
+                        if ui.button("Move").clicked() {
                             if let Ok(servo) = ST3215::new("ACM03") {
                                 let _ = servo.move_to(servo_id, state.target_position, state.target_speed, state.acceleration, false);
                             }
                         }
                         
-                        let torque_text = if state.torque_enabled { "🔓 Disable Torque" } else { "🔒 Enable Torque" };
+                        let torque_text = if state.torque_enabled { "Disable Torque" } else { "Enable Torque" };
                         if ui.button(torque_text).clicked() {
                             if let Ok(servo) = ST3215::new("ACM03") {
                                 let enable = if state.torque_enabled { 0 } else { 1 };
@@ -254,7 +254,7 @@ impl eframe::App for ServoGuiApp {
                 
                 // Graphiques
                 ui.group(|ui| {
-                    ui.heading("📊 Real-time Monitoring");
+                    ui.heading("Real-time Monitoring");
                     ui.add_space(5.0);
                     
                     // Graphique de position
