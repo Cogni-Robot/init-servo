@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         
                         // Proposer l'initialisation si un seul servo est connecté
                         if servos.len() == 1 {
-                            println!("\n→ Un seul servomoteur détecté (ID: {})", servos[0]);
+                            println!("\nUn seul servomoteur détecté (ID: {})", servos[0]);
                             println!("Voulez-vous changer son ID ? (o/n)");
                             
                             let mut input = String::new();

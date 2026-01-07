@@ -1,71 +1,365 @@
+use eframe::egui;
+use egui_plot::{Line, Plot, PlotPoints};
 use st3215::ST3215;
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Cogni-robot - Initialisation des servomoteurs ===");
-    println!("Appuyez sur Ctrl+C pour quitter\n");
+struct ServoData {
+    position: Option<u16>,
+    speed: Option<u16>,
+    load: Option<f32>,
+    voltage: Option<f32>,
+    current: Option<f32>,
+    temperature: Option<u8>,
+    is_moving: Option<bool>,
+    last_update: Instant,
+}
 
-    let mut last_servos: Vec<u8> = Vec::new();
-    let mut servo_connected = false;
+impl Default for ServoData {
+    fn default() -> Self {
+        Self {
+            position: None,
+            speed: None,
+            load: None,
+            voltage: None,
+            current: None,
+            temperature: None,
+            is_moving: None,
+            last_update: Instant::now(),
+        }
+    }
+}
 
-    loop {
-        // Tentative de connexion/reconnexion à la carte
-        match ST3215::new("ACM03") {
-            Ok(servo) => {
-                if !servo_connected {
-                    println!("Carte de contrôle détectée sur ACM03");
-                    servo_connected = true;
-                }
+struct AppState {
+    connected: bool,
+    servo_ids: Vec<u8>,
+    selected_servo: Option<u8>,
+    servo_data: ServoData,
+    new_id_input: String,
+    target_position: u16,
+    target_speed: u16,
+    acceleration: u8,
+    torque_enabled: bool,
+    position_history: Vec<(f64, f64)>,
+    temperature_history: Vec<(f64, f64)>,
+    start_time: Instant,
+}
 
-                // Récupérer la liste des servomoteurs connectés
-                let servos = servo.list_servos();
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            connected: false,
+            servo_ids: Vec::new(),
+            selected_servo: None,
+            servo_data: ServoData::default(),
+            new_id_input: String::new(),
+            target_position: 2048,
+            target_speed: 1000,
+            acceleration: 50,
+            torque_enabled: false,
+            position_history: Vec::new(),
+            temperature_history: Vec::new(),
+            start_time: Instant::now(),
+        }
+    }
+}
 
-                // Détecter les changements
-                if servos != last_servos {
-                    if servos.is_empty() {
-                        println!("/!\\ Aucun servomoteur détecté");
+struct ServoGuiApp {
+    state: Arc<Mutex<AppState>>,
+}
+
+impl ServoGuiApp {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let state = Arc::new(Mutex::new(AppState::default()));
+        
+        // Configure le style moderne
+        let mut style = (*cc.egui_ctx.style()).clone();
+        style.visuals.window_corner_radius = egui::CornerRadius::same(10);
+        style.visuals.window_shadow.blur = 20;
+        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+        cc.egui_ctx.set_style(style);
+        
+        // Thread de monitoring
+        let state_clone = Arc::clone(&state);
+        let ctx_clone = cc.egui_ctx.clone();
+        thread::spawn(move || {
+            monitoring_thread(state_clone, ctx_clone);
+        });
+
+        Self { state }
+    }
+}
+
+impl eframe::App for ServoGuiApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Panel supérieur avec titre
+        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.heading("🤖 Cogni-Robot Servo Control");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label("by notpunchnox");
+                    let state = self.state.lock().unwrap();
+                    let status_color = if state.connected {
+                        egui::Color32::from_rgb(46, 204, 113)
                     } else {
-                        println!("Servomoteurs connectés: {:?} (Total: {})", servos, servos.len());
+                        egui::Color32::from_rgb(231, 76, 60)
+                    };
+                    ui.colored_label(status_color, if state.connected { "● Connected" } else { "● Disconnected" });
+                });
+            });
+            ui.add_space(10.0);
+        });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let mut state = self.state.lock().unwrap();
+            
+            ui.add_space(10.0);
+            
+            // Section de détection des servos
+            ui.group(|ui| {
+                ui.set_min_height(100.0);
+                ui.heading("📡 Servo Detection");
+                ui.add_space(5.0);
+                
+                if state.servo_ids.is_empty() {
+                    ui.colored_label(egui::Color32::from_rgb(230, 126, 34), "⚠ No servo detected");
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("🎯 Detected servos: {} ", state.servo_ids.len()));
+                        ui.label(format!("{:?}", state.servo_ids));
+                    });
+                    
+                    ui.add_space(5.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Select servo:");
+                        for &id in &state.servo_ids.clone() {
+                            let is_selected = state.selected_servo == Some(id);
+                            if ui.selectable_label(is_selected, format!("ID {}", id)).clicked() {
+                                state.selected_servo = Some(id);
+                            }
+                        }
+                    });
+                }
+            });
+
+            ui.add_space(10.0);
+
+            // Section de changement d'ID
+            if state.servo_ids.len() == 1 {
+                ui.group(|ui| {
+                    ui.heading("🔧 Change Servo ID");
+                    ui.add_space(5.0);
+                    
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Current ID: {}", state.servo_ids[0]));
+                        ui.label("→ New ID:");
+                        ui.add(egui::TextEdit::singleline(&mut state.new_id_input)
+                            .desired_width(60.0)
+                            .hint_text("0-253"));
                         
-                        // Proposer l'initialisation si un seul servo est connecté
-                        if servos.len() == 1 {
-                            println!("\n→ Un seul servomoteur détecté (ID: {})", servos[0]);
-                            println!("Voulez-vous changer son ID ? (o/n)");
-                            
-                            let mut input = String::new();
-                            if std::io::stdin().read_line(&mut input).is_ok() {
-                                if input.trim().to_lowercase() == "o" {
-                                    println!("Entrez la nouvelle ID (0-253):");
-                                    let mut id_input = String::new();
-                                    if std::io::stdin().read_line(&mut id_input).is_ok() {
-                                        if let Ok(new_id) = id_input.trim().parse::<u8>() {
-                                            match servo.change_id(servos[0], new_id) {
-                                                Ok(_) => println!("✓ ID changée avec succès: {} → {}\n", servos[0], new_id),
-                                                Err(e) => println!("✗ Erreur: {}\n", e),
-                                            }
-                                        }
+                        if ui.button("✓ Apply").clicked() {
+                            if let Ok(new_id) = state.new_id_input.parse::<u8>() {
+                                if new_id <= 253 {
+                                    if let Ok(servo) = ST3215::new("ACM03") {
+                                        let _ = servo.change_id(state.servo_ids[0], new_id);
                                     }
                                 }
                             }
-                        } else if servos.len() > 1 {
-                            println!("/!\\ Plusieurs servomoteurs détectés. Connectez-en un seul pour changer l'ID.");
                         }
-                    }
+                    });
+                });
+                ui.add_space(10.0);
+            }
+
+            // Section de contrôle du servo sélectionné
+            if let Some(servo_id) = state.selected_servo {
+                ui.group(|ui| {
+                    ui.heading(format!("🎮 Control Servo ID {}", servo_id));
+                    ui.add_space(5.0);
                     
-                    last_servos = servos;
+                    // Affichage des données en temps réel
+                    ui.columns(3, |columns| {
+                        columns[0].vertical(|ui| {
+                            ui.label("📍 Position:");
+                            if let Some(pos) = state.servo_data.position {
+                                ui.heading(format!("{}", pos));
+                            } else {
+                                ui.label("N/A");
+                            }
+                        });
+                        
+                        columns[1].vertical(|ui| {
+                            ui.label("🌡️ Temperature:");
+                            if let Some(temp) = state.servo_data.temperature {
+                                let color = if temp > 60 {
+                                    egui::Color32::RED
+                                } else if temp > 45 {
+                                    egui::Color32::from_rgb(230, 126, 34)
+                                } else {
+                                    egui::Color32::from_rgb(46, 204, 113)
+                                };
+                                ui.colored_label(color, format!("{}°C", temp));
+                            } else {
+                                ui.label("N/A");
+                            }
+                        });
+                        
+                        columns[2].vertical(|ui| {
+                            ui.label("⚡ Voltage:");
+                            if let Some(v) = state.servo_data.voltage {
+                                ui.heading(format!("{:.2}V", v));
+                            } else {
+                                ui.label("N/A");
+                            }
+                        });
+                    });
+                    
+                    ui.add_space(10.0);
+                    
+                    // Contrôles de mouvement
+                    ui.separator();
+                    ui.add_space(5.0);
+                    ui.label("🎯 Target Position (0-4095):");
+                    ui.add(egui::Slider::new(&mut state.target_position, 0..=4095));
+                    
+                    ui.label("⚡ Speed (0-3400):");
+                    ui.add(egui::Slider::new(&mut state.target_speed, 0..=3400));
+                    
+                    ui.label("🚀 Acceleration (0-254):");
+                    ui.add(egui::Slider::new(&mut state.acceleration, 0..=254));
+                    
+                    ui.add_space(5.0);
+                    
+                    ui.horizontal(|ui| {
+                        if ui.button("▶ Move").clicked() {
+                            if let Ok(servo) = ST3215::new("ACM03") {
+                                let _ = servo.move_to(servo_id, state.target_position, state.target_speed, state.acceleration, false);
+                            }
+                        }
+                        
+                        let torque_text = if state.torque_enabled { "🔓 Disable Torque" } else { "🔒 Enable Torque" };
+                        if ui.button(torque_text).clicked() {
+                            if let Ok(servo) = ST3215::new("ACM03") {
+                                let enable = if state.torque_enabled { 0 } else { 1 };
+                                // let _ = servo.sts_enable_torque(servo_id, enable);
+                                state.torque_enabled = !state.torque_enabled;
+                            }
+                        }
+                    });
+                });
+                
+                ui.add_space(10.0);
+                
+                // Graphiques
+                ui.group(|ui| {
+                    ui.heading("📊 Real-time Monitoring");
+                    ui.add_space(5.0);
+                    
+                    // Graphique de position
+                    Plot::new("position_plot")
+                        .height(150.0)
+                        .view_aspect(2.0)
+                        .show(ui, |plot_ui| {
+                            let points: PlotPoints = state.position_history.iter()
+                                .map(|(x, y)| [*x, *y])
+                                .collect();
+                            plot_ui.line(Line::new("Position", points).color(egui::Color32::from_rgb(52, 152, 219)));
+                        });
+                    
+                    ui.add_space(5.0);
+                    
+                    // Graphique de température
+                    Plot::new("temperature_plot")
+                        .height(150.0)
+                        .view_aspect(2.0)
+                        .show(ui, |plot_ui| {
+                            let points: PlotPoints = state.temperature_history.iter()
+                                .map(|(x, y)| [*x, *y])
+                                .collect();
+                            plot_ui.line(Line::new("Temperature", points).color(egui::Color32::from_rgb(231, 76, 60)));
+                        });
+                });
+            }
+        });
+
+        ctx.request_repaint_after(Duration::from_millis(100));
+    }
+}
+
+fn monitoring_thread(state: Arc<Mutex<AppState>>, ctx: egui::Context) {
+    loop {
+        match ST3215::new("ACM03") {
+            Ok(servo) => {
+                let mut state = state.lock().unwrap();
+                state.connected = true;
+                
+                let servos = servo.list_servos();
+                state.servo_ids = servos;
+                
+                if let Some(servo_id) = state.selected_servo {
+                    if state.servo_ids.contains(&servo_id) {
+                        // Lire les données du servo
+                        if let Some(pos) = servo.read_position(servo_id) {
+                            state.servo_data.position = Some(pos);
+                            let time = state.start_time.elapsed().as_secs_f64();
+                            state.position_history.push((time, pos as f64));
+                            if state.position_history.len() > 100 {
+                                state.position_history.remove(0);
+                            }
+                        }
+                        
+                        if let Some(temp) = servo.read_temperature(servo_id) {
+                            state.servo_data.temperature = Some(temp);
+                            let time = state.start_time.elapsed().as_secs_f64();
+                            state.temperature_history.push((time, temp as f64));
+                            if state.temperature_history.len() > 100 {
+                                state.temperature_history.remove(0);
+                            }
+                        }
+                        
+                        if let Some(voltage) = servo.read_voltage(servo_id) {
+                            state.servo_data.voltage = Some(voltage);
+                        }
+                        
+                        if let Some(current) = servo.read_current(servo_id) {
+                            state.servo_data.current = Some(current);
+                        }
+                        
+                        if let Some(speed) = servo.read_speed(servo_id) {
+                            state.servo_data.speed = Some(speed as u16);
+                        }
+                        
+                        state.servo_data.last_update = Instant::now();
+                    }
                 }
             }
             Err(_) => {
-                if servo_connected {
-                    println!("/!\\ Carte de contrôle déconnectée");
-                    servo_connected = false;
-                    last_servos.clear();
-                }
+                let mut state = state.lock().unwrap();
+                state.connected = false;
             }
         }
-
-        // Attendre avant la prochaine détection
-        thread::sleep(Duration::from_millis(1000));
+        
+        ctx.request_repaint();
+        thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn main() -> Result<(), eframe::Error> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1000.0, 800.0])
+            .with_min_inner_size([800.0, 600.0])
+            .with_icon(
+                eframe::icon_data::from_png_bytes(&[]).unwrap_or_default(),
+            ),
+        ..Default::default()
+    };
+    
+    eframe::run_native(
+        "Cogni-Robot Servo Control",
+        options,
+        Box::new(|cc| Ok(Box::new(ServoGuiApp::new(cc)))),
+    )
 }
