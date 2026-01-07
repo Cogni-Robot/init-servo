@@ -6,4 +6,5 @@ edition = "2024"
 [dependencies]
 eframe = "0.33.3"
 egui = "0.33.3"
+egui_plot = "0.34.0"
 sts3215-controller = "0.1.0"
