@@ -106,7 +106,7 @@ impl eframe::App for ServoGuiApp {
                     } else {
                         egui::Color32::from_rgb(231, 76, 60)
                     };
-                    ui.colored_label(status_color, if state.connected { "● Connected" } else { "● Disconnected" });
+                    ui.colored_label(status_color, if state.connected { "Connected" } else { "Disconnected" });
                 });
             });
             ui.add_space(10.0);
@@ -162,7 +162,7 @@ impl eframe::App for ServoGuiApp {
                         if ui.button("Apply").clicked() {
                             if let Ok(new_id) = state.new_id_input.parse::<u8>() {
                                 if new_id <= 253 {
-                                    if let Ok(servo) = ST3215::new("ACM03") {
+                                    if let Ok(servo) = ST3215::new("COM3") {
                                         let _ = servo.change_id(state.servo_ids[0], new_id);
                                     }
                                 }
@@ -234,18 +234,26 @@ impl eframe::App for ServoGuiApp {
                     
                     ui.horizontal(|ui| {
                         if ui.button("Move").clicked() {
-                            if let Ok(servo) = ST3215::new("ACM03") {
-                                let _ = servo.move_to(servo_id, state.target_position, state.target_speed, state.acceleration, false);
-                            }
+                            let pos = state.target_position;
+                            let spd = state.target_speed;
+                            let acc = state.acceleration;
+                            thread::spawn(move || {
+                                if let Ok(servo) = ST3215::new("COM3") {
+                                    let _ = servo.move_to(servo_id, pos, spd, acc, false);
+                                }
+                            });
                         }
                         
                         let torque_text = if state.torque_enabled { "Disable Torque" } else { "Enable Torque" };
                         if ui.button(torque_text).clicked() {
-                            if let Ok(servo) = ST3215::new("ACM03") {
-                                let enable = if state.torque_enabled { 0 } else { 1 };
-                                // let _ = servo.sts_enable_torque(servo_id, enable);
-                                state.torque_enabled = !state.torque_enabled;
-                            }
+                            let enabled = state.torque_enabled;
+                            state.torque_enabled = !state.torque_enabled;
+                            thread::spawn(move || {
+                                if let Ok(servo) = ST3215::new("COM3") {
+                                    let enable = if enabled { 0 } else { 1 };
+                                    // let _ = servo.sts_enable_torque(servo_id, enable);
+                                }
+                            });
                         }
                     });
                 });
@@ -281,7 +289,7 @@ impl eframe::App for ServoGuiApp {
                             plot_ui.line(Line::new("Temperature", points).color(egui::Color32::from_rgb(231, 76, 60)));
                         });
                 });
-            }
+            }2
         });
 
         ctx.request_repaint_after(Duration::from_millis(100));
@@ -289,58 +297,93 @@ impl eframe::App for ServoGuiApp {
 }
 
 fn monitoring_thread(state: Arc<Mutex<AppState>>, ctx: egui::Context) {
+    let mut servo_connection: Option<ST3215> = None;
+    let mut cycle_count = 0u32;
+    
     loop {
-        match ST3215::new("ACM03") {
-            Ok(servo) => {
-                let mut state = state.lock().unwrap();
-                state.connected = true;
-                
-                let servos = servo.list_servos();
-                state.servo_ids = servos;
-                
-                if let Some(servo_id) = state.selected_servo {
-                    if state.servo_ids.contains(&servo_id) {
-                        // Lire les données du servo
-                        if let Some(pos) = servo.read_position(servo_id) {
-                            state.servo_data.position = Some(pos);
-                            let time = state.start_time.elapsed().as_secs_f64();
-                            state.position_history.push((time, pos as f64));
-                            if state.position_history.len() > 100 {
-                                state.position_history.remove(0);
-                            }
-                        }
-                        
-                        if let Some(temp) = servo.read_temperature(servo_id) {
-                            state.servo_data.temperature = Some(temp);
-                            let time = state.start_time.elapsed().as_secs_f64();
-                            state.temperature_history.push((time, temp as f64));
-                            if state.temperature_history.len() > 100 {
-                                state.temperature_history.remove(0);
-                            }
-                        }
-                        
-                        if let Some(voltage) = servo.read_voltage(servo_id) {
-                            state.servo_data.voltage = Some(voltage);
-                        }
-                        
-                        if let Some(current) = servo.read_current(servo_id) {
-                            state.servo_data.current = Some(current);
-                        }
-                        
-                        if let Some(speed) = servo.read_speed(servo_id) {
-                            state.servo_data.speed = Some(speed as u16);
-                        }
-                        
-                        state.servo_data.last_update = Instant::now();
-                    }
-                }
-            }
-            Err(_) => {
-                let mut state = state.lock().unwrap();
-                state.connected = false;
-            }
+        // Réutiliser la connexion ou en créer une nouvelle si nécessaire
+        if servo_connection.is_none() {
+            servo_connection = ST3215::new("COM3").ok();
         }
         
+        if let Some(ref servo) = servo_connection {
+            // Obtenir les IDs et le servo sélectionné (lock court)
+            let (servo_ids, selected_servo, start_time) = {
+                let mut state = state.lock().unwrap();
+                state.connected = true;
+                let servos = servo.list_servos();
+                state.servo_ids = servos.clone();
+                (servos, state.selected_servo, state.start_time)
+            }; // Lock libéré ici
+            
+            if let Some(servo_id) = selected_servo {
+                if servo_ids.contains(&servo_id) {
+                    // Lire position et température à chaque cycle (données critiques)
+                    let pos = servo.read_position(servo_id);
+                    let temp = servo.read_temperature(servo_id);
+                    
+                    // Lire les autres données moins souvent (tous les 5 cycles = 500ms)
+                    let voltage = if cycle_count % 5 == 0 {
+                        servo.read_voltage(servo_id)
+                    } else {
+                        None
+                    };
+                    
+                    let current = if cycle_count % 5 == 1 {
+                        servo.read_current(servo_id)
+                    } else {
+                        None
+                    };
+                    
+                    let speed = if cycle_count % 3 == 0 {
+                        servo.read_speed(servo_id).map(|s| s as u16)
+                    } else {
+                        None
+                    };
+                    
+                    // Mettre à jour l'état (lock court)
+                    let mut state = state.lock().unwrap();
+                    let time = start_time.elapsed().as_secs_f64();
+                    
+                    if let Some(pos) = pos {
+                        state.servo_data.position = Some(pos);
+                        state.position_history.push((time, pos as f64));
+                        if state.position_history.len() > 100 {
+                            state.position_history.remove(0);
+                        }
+                    }
+                    
+                    if let Some(temp) = temp {
+                        state.servo_data.temperature = Some(temp);
+                        state.temperature_history.push((time, temp as f64));
+                        if state.temperature_history.len() > 100 {
+                            state.temperature_history.remove(0);
+                        }
+                    }
+                    
+                    if let Some(v) = voltage {
+                        state.servo_data.voltage = Some(v);
+                    }
+                    
+                    if let Some(c) = current {
+                        state.servo_data.current = Some(c);
+                    }
+                    
+                    if let Some(s) = speed {
+                        state.servo_data.speed = Some(s);
+                    }
+                    
+                    state.servo_data.last_update = Instant::now();
+                } // Lock libéré ici
+            }
+        } else {
+            // Pas de connexion
+            let mut state = state.lock().unwrap();
+            state.connected = false;
+            // Réessayer la connexion au prochain cycle
+        }
+        
+        cycle_count = cycle_count.wrapping_add(1);
         ctx.request_repaint();
         thread::sleep(Duration::from_millis(100));
     }

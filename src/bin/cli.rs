@@ -11,10 +11,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         // Tentative de connexion/reconnexion à la carte
-        match ST3215::new("ACM03") {
+        match ST3215::new("COM3") {
             Ok(servo) => {
                 if !servo_connected {
-                    println!("Carte de contrôle détectée sur ACM03");
+                    println!("Carte de contrôle détectée sur COM3");
                     servo_connected = true;
                 }
 
