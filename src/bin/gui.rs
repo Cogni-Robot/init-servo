@@ -2,8 +2,17 @@ use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints};
 use st3215::ST3215;
 use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{channel, Sender, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[derive(Clone)]
+enum ServoCommand {
+    Move { id: u8, position: u16, speed: u16, acceleration: u8 },
+    EnableTorque { id: u8 },
+    DisableTorque { id: u8 },
+    ScanServos,
+}
 
 struct ServoData {
     position: Option<u16>,
@@ -44,10 +53,12 @@ struct AppState {
     position_history: Vec<(f64, f64)>,
     temperature_history: Vec<(f64, f64)>,
     start_time: Instant,
+    command_sender: Sender<ServoCommand>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
+        let (tx, _) = channel();
         Self {
             connected: false,
             servo_ids: Vec::new(),
@@ -61,6 +72,7 @@ impl Default for AppState {
             position_history: Vec::new(),
             temperature_history: Vec::new(),
             start_time: Instant::now(),
+            command_sender: tx,
         }
     }
 }
@@ -71,7 +83,10 @@ struct ServoGuiApp {
 
 impl ServoGuiApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let state = Arc::new(Mutex::new(AppState::default()));
+        let (tx, rx) = channel::<ServoCommand>();
+        let mut default_state = AppState::default();
+        default_state.command_sender = tx;
+        let state = Arc::new(Mutex::new(default_state));
         
         // Configure le style moderne
         let mut style = (*cc.egui_ctx.style()).clone();
@@ -84,7 +99,7 @@ impl ServoGuiApp {
         let state_clone = Arc::clone(&state);
         let ctx_clone = cc.egui_ctx.clone();
         thread::spawn(move || {
-            monitoring_thread(state_clone, ctx_clone);
+            monitoring_thread(state_clone, ctx_clone, rx);
         });
 
         Self { state }
@@ -123,14 +138,20 @@ impl eframe::App for ServoGuiApp {
                 ui.heading("Servo Detection");
                 ui.add_space(5.0);
                 
-                if state.servo_ids.is_empty() {
-                    ui.colored_label(egui::Color32::from_rgb(230, 126, 34), "⚠ No servo detected");
-                } else {
-                    ui.horizontal(|ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Scan Servos").clicked() {
+                        let _ = state.command_sender.send(ServoCommand::ScanServos);
+                    }
+                    
+                    if state.servo_ids.is_empty() {
+                        ui.colored_label(egui::Color32::from_rgb(230, 126, 34), "⚠ No servo detected");
+                    } else {
                         ui.label(format!("Detected servos: {} ", state.servo_ids.len()));
                         ui.label(format!("{:?}", state.servo_ids));
-                    });
-                    
+                    }
+                });
+                
+                if !state.servo_ids.is_empty() {
                     ui.add_space(5.0);
                     ui.horizontal(|ui| {
                         ui.label("Select servo:");
@@ -234,26 +255,25 @@ impl eframe::App for ServoGuiApp {
                     
                     ui.horizontal(|ui| {
                         if ui.button("Move").clicked() {
-                            let pos = state.target_position;
-                            let spd = state.target_speed;
-                            let acc = state.acceleration;
-                            thread::spawn(move || {
-                                if let Ok(servo) = ST3215::new("COM3") {
-                                    let _ = servo.move_to(servo_id, pos, spd, acc, false);
-                                }
+                            let _ = state.command_sender.send(ServoCommand::Move {
+                                id: servo_id,
+                                position: state.target_position,
+                                speed: state.target_speed,
+                                acceleration: state.acceleration,
                             });
+                            if !state.torque_enabled {
+                                state.torque_enabled = true;
+                            }
                         }
                         
                         let torque_text = if state.torque_enabled { "Disable Torque" } else { "Enable Torque" };
                         if ui.button(torque_text).clicked() {
-                            let enabled = state.torque_enabled;
+                            if state.torque_enabled {
+                                let _ = state.command_sender.send(ServoCommand::DisableTorque { id: servo_id });
+                            } else {
+                                let _ = state.command_sender.send(ServoCommand::EnableTorque { id: servo_id });
+                            }
                             state.torque_enabled = !state.torque_enabled;
-                            thread::spawn(move || {
-                                if let Ok(servo) = ST3215::new("COM3") {
-                                    let enable = if enabled { 0 } else { 1 };
-                                    // let _ = servo.sts_enable_torque(servo_id, enable);
-                                }
-                            });
                         }
                     });
                 });
@@ -292,37 +312,66 @@ impl eframe::App for ServoGuiApp {
             }2
         });
 
-        ctx.request_repaint_after(Duration::from_millis(100));
+        ctx.request_repaint_after(Duration::from_millis(200));
     }
 }
 
-fn monitoring_thread(state: Arc<Mutex<AppState>>, ctx: egui::Context) {
+fn monitoring_thread(state: Arc<Mutex<AppState>>, ctx: egui::Context, rx: Receiver<ServoCommand>) {
     let mut servo_connection: Option<ST3215> = None;
     let mut cycle_count = 0u32;
+    let mut cached_servo_ids: Vec<u8> = Vec::new();
     
     loop {
-        // Réutiliser la connexion ou en créer une nouvelle si nécessaire
+        // Essayer de se connecter si pas de connexion
         if servo_connection.is_none() {
             servo_connection = ST3215::new("COM3").ok();
+            if servo_connection.is_some() {
+                // Scanner les servos au démarrage
+                if let Some(ref servo) = servo_connection {
+                    cached_servo_ids = servo.list_servos();
+                    let mut state = state.lock().unwrap();
+                    state.connected = true;
+                    state.servo_ids = cached_servo_ids.clone();
+                }
+            }
         }
         
         if let Some(ref servo) = servo_connection {
-            // Obtenir les IDs et le servo sélectionné (lock court)
-            let (servo_ids, selected_servo, start_time) = {
-                let mut state = state.lock().unwrap();
-                state.connected = true;
-                let servos = servo.list_servos();
-                state.servo_ids = servos.clone();
-                (servos, state.selected_servo, state.start_time)
-            }; // Lock libéré ici
+            // Traiter toutes les commandes en attente
+            while let Ok(cmd) = rx.try_recv() {
+                match cmd {
+                    ServoCommand::Move { id, position, speed, acceleration } => {
+                        // Activer le torque avant de bouger
+                        let _ = servo.enable_torque(id);
+                        thread::sleep(Duration::from_millis(10));
+                        let _ = servo.move_to(id, position, speed, acceleration, false);
+                    }
+                    ServoCommand::EnableTorque { id } => {
+                        let _ = servo.enable_torque(id);
+                    }
+                    ServoCommand::DisableTorque { id } => {
+                        let _ = servo.disable_torque(id);
+                    }
+                    ServoCommand::ScanServos => {
+                        cached_servo_ids = servo.list_servos();
+                        let mut state = state.lock().unwrap();
+                        state.servo_ids = cached_servo_ids.clone();
+                    }
+                }
+            }
+            
+            // Lecture des données du servo sélectionné (lock court)
+            let (selected_servo, start_time) = {
+                let state = state.lock().unwrap();
+                (state.selected_servo, state.start_time)
+            };
             
             if let Some(servo_id) = selected_servo {
-                if servo_ids.contains(&servo_id) {
-                    // Lire position et température à chaque cycle (données critiques)
+                if cached_servo_ids.contains(&servo_id) {
+                    // Lire position et température à chaque cycle
                     let pos = servo.read_position(servo_id);
                     let temp = servo.read_temperature(servo_id);
                     
-                    // Lire les autres données moins souvent (tous les 5 cycles = 500ms)
                     let voltage = if cycle_count % 5 == 0 {
                         servo.read_voltage(servo_id)
                     } else {
@@ -341,7 +390,7 @@ fn monitoring_thread(state: Arc<Mutex<AppState>>, ctx: egui::Context) {
                         None
                     };
                     
-                    // Mettre à jour l'état (lock court)
+                    // Mettre à jour l'état
                     let mut state = state.lock().unwrap();
                     let time = start_time.elapsed().as_secs_f64();
                     
@@ -374,13 +423,12 @@ fn monitoring_thread(state: Arc<Mutex<AppState>>, ctx: egui::Context) {
                     }
                     
                     state.servo_data.last_update = Instant::now();
-                } // Lock libéré ici
+                }
             }
         } else {
             // Pas de connexion
             let mut state = state.lock().unwrap();
             state.connected = false;
-            // Réessayer la connexion au prochain cycle
         }
         
         cycle_count = cycle_count.wrapping_add(1);
