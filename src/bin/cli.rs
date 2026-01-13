@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         // Tentative de connexion/reconnexion à la carte
-        match ST3215::new("COM3") {
+        match ST3215::new("/dev/ttyACM0") {
             Ok(servo) => {
                 if !servo_connected {
                     println!("Carte de contrôle détectée sur COM3");
@@ -20,6 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Récupérer la liste des servomoteurs connectés
                 let servos = servo.list_servos();
+                println!("Détection des servomoteurs... {}", servos.len());
 
                 // Détecter les changements
                 if servos != last_servos {

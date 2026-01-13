@@ -40,6 +40,8 @@ impl Default for ServoData {
     }
 }
 
+const PORT: &str = "/dev/ttyACM0";
+
 struct AppState {
     connected: bool,
     servo_ids: Vec<u8>,
@@ -183,7 +185,7 @@ impl eframe::App for ServoGuiApp {
                         if ui.button("Apply").clicked() {
                             if let Ok(new_id) = state.new_id_input.parse::<u8>() {
                                 if new_id <= 253 {
-                                    if let Ok(servo) = ST3215::new("COM3") {
+                                    if let Ok(servo) = ST3215::new(PORT) {
                                         let _ = servo.change_id(state.servo_ids[0], new_id);
                                     }
                                 }
@@ -324,7 +326,7 @@ fn monitoring_thread(state: Arc<Mutex<AppState>>, ctx: egui::Context, rx: Receiv
     loop {
         // Essayer de se connecter si pas de connexion
         if servo_connection.is_none() {
-            servo_connection = ST3215::new("COM3").ok();
+            servo_connection = ST3215::new(PORT).ok();
             if servo_connection.is_some() {
                 // Scanner les servos au démarrage
                 if let Some(ref servo) = servo_connection {
