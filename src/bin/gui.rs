@@ -12,6 +12,7 @@ enum ServoCommand {
     EnableTorque { id: u8 },
     DisableTorque { id: u8 },
     ScanServos,
+    ChangeId { old_id: u8, new_id: u8 },
 }
 
 struct ServoData {
@@ -185,10 +186,16 @@ impl eframe::App for ServoGuiApp {
                         if ui.button("Apply").clicked() {
                             if let Ok(new_id) = state.new_id_input.parse::<u8>() {
                                 if new_id <= 253 {
-                                    if let Ok(servo) = ST3215::new(PORT) {
-                                        let _ = servo.change_id(state.servo_ids[0], new_id);
-                                    }
+                                    let _ = state.command_sender.send(ServoCommand::ChangeId {
+                                        old_id: state.servo_ids[0],
+                                        new_id,
+                                    });
+                                    state.new_id_input.clear();
+                                } else {
+                                    eprintln!("Invalid new ID: {} (must be 0-253)", new_id);
                                 }
+                            } else {
+                                eprintln!("Invalid input for new ID: {}", state.new_id_input);
                             }
                         }
                     });
@@ -358,6 +365,24 @@ fn monitoring_thread(state: Arc<Mutex<AppState>>, ctx: egui::Context, rx: Receiv
                         cached_servo_ids = servo.list_servos();
                         let mut state = state.lock().unwrap();
                         state.servo_ids = cached_servo_ids.clone();
+                    }
+                    ServoCommand::ChangeId { old_id, new_id } => {
+                        match servo.change_id(old_id, new_id) {
+                            Ok(_) => {
+                                println!("Servo ID changed successfully from {} to {}", old_id, new_id);
+                                // Rescan servos to update the list
+                                cached_servo_ids = servo.list_servos();
+                                let mut state = state.lock().unwrap();
+                                state.servo_ids = cached_servo_ids.clone();
+                                // Update selected servo if it was the old one
+                                if state.selected_servo == Some(old_id) {
+                                    state.selected_servo = Some(new_id);
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to change servo ID: {}", e);
+                            }
+                        }
                     }
                 }
             }
